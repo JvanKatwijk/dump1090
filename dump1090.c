@@ -43,7 +43,11 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#ifdef	__SDRPLAY__
+#include "mirsdrapi-rsp.h"
+#else
 #include "rtl-sdr.h"
+#endif
 #include "anet.h"
 
 #define MODES_DEFAULT_RATE         2000000
@@ -52,9 +56,10 @@
 #define MODES_DEFAULT_HEIGHT       700
 #define MODES_ASYNC_BUF_NUMBER     12
 #define MODES_DATA_LEN             (16*16384)   /* 256k */
+#ifndef	__SDRPLAY__
 #define MODES_AUTO_GAIN            -100         /* Use automatic gain. */
 #define MODES_MAX_GAIN             999999       /* Use max available gain. */
-
+#endif
 #define MODES_PREAMBLE_US 8       /* microseconds */
 #define MODES_LONG_MSG_BITS 112
 #define MODES_SHORT_MSG_BITS 56
@@ -128,7 +133,6 @@ struct {
     pthread_t reader_thread;
     pthread_mutex_t data_mutex;     /* Mutex to synchronize buffer access. */
     pthread_cond_t data_cond;       /* Conditional variable associated. */
-    unsigned char *data;            /* Raw IQ samples buffer */
     uint16_t *magnitude;            /* Magnitude vector */
     uint32_t data_len;              /* Buffer length. */
     int fd;                         /* --ifile option file descriptor. */
@@ -137,13 +141,24 @@ struct {
     uint16_t *maglut;               /* I/Q -> Magnitude lookup table. */
     int exit;                       /* Exit from the main loop when true. */
 
-    /* RTLSDR */
-    int dev_index;
-    int gain;
-    int enable_agc;
-    rtlsdr_dev_t *dev;
-    int freq;
-
+#ifdef	__SDRPLAY__
+	int	dev_index;
+	int	lnaState;
+	int	GRdB;
+	int	freq;
+	int	enable_agc;
+	int16_t *data;            /* Raw IQ samples buffer */
+	int	nextp;
+	int16_t	*localBuf;
+#else
+	/* RTLSDR */
+	int dev_index;
+	int gain;
+	int enable_agc;
+	rtlsdr_dev_t *dev;
+	int freq;
+	uint8_t *data;            /* Raw IQ samples buffer */
+#endif
     /* Networking */
     char aneterr[ANET_ERR_LEN];
     struct client *clients[MODES_NET_MAX_FD]; /* Our clients. */
@@ -257,7 +272,12 @@ static long long mstime(void) {
 /* =============================== Initialization =========================== */
 
 void modesInitConfig(void) {
+#ifdef	__SDRPLAY__
+	Modes. lnaState	= 2;
+	Modes. GRdB	= 30;
+#else
     Modes.gain = MODES_MAX_GAIN;
+#endif
     Modes.dev_index = 0;
     Modes.enable_agc = 0;
     Modes.freq = MODES_DEFAULT_FREQ;
@@ -277,8 +297,9 @@ void modesInitConfig(void) {
 }
 
 void modesInit(void) {
+#ifndef	__SDRPLAY__
     int i, q;
-
+#endif
     pthread_mutex_init(&Modes.data_mutex,NULL);
     pthread_cond_init(&Modes.data_cond,NULL);
     /* We add a full message minus a final bit to the length, so that we
@@ -294,13 +315,25 @@ void modesInit(void) {
     memset(Modes.icao_cache,0,sizeof(uint32_t)*MODES_ICAO_CACHE_LEN*2);
     Modes.aircrafts = NULL;
     Modes.interactive_last_update = 0;
+
+#ifdef	__SDRPLAY__
+	if (((Modes.data =
+	   ((int16_t *)malloc (Modes. data_len * sizeof (int16_t)))) == NULL) ||
+            ((Modes.magnitude =
+	   ((uint16_t *)malloc (Modes. data_len * sizeof (int16_t)))) == NULL) ||
+	    ((Modes. localBuf =
+	   ((int16_t *)malloc (MODES_DATA_LEN * sizeof (int16_t)))) == NULL)) {
+        fprintf(stderr, "Out of memory allocating data buffer.\n");
+        exit(1);
+    }
+	memset(Modes. data, 32767, Modes.data_len);
+#else
     if ((Modes.data = malloc(Modes.data_len)) == NULL ||
         (Modes.magnitude = malloc(Modes.data_len*2)) == NULL) {
         fprintf(stderr, "Out of memory allocating data buffer.\n");
         exit(1);
     }
     memset(Modes.data,127,Modes.data_len);
-
     /* Populate the I/Q -> Magnitude lookup table. It is used because
      * sqrt or round may be expensive and may vary a lot depending on
      * the libc used.
@@ -314,7 +347,7 @@ void modesInit(void) {
             Modes.maglut[i*129+q] = round(sqrt(i*i+q*q)*360);
         }
     }
-
+#endif
     /* Statistics */
     Modes.stat_valid_preamble = 0;
     Modes.stat_demodulated = 0;
@@ -329,6 +362,93 @@ void modesInit(void) {
     Modes.exit = 0;
 }
 
+#ifdef	__SDRPLAY__
+/* =============================== SDRPLAY handling ======================= */
+void	modesInitSDRPLAY (void) {
+mir_sdr_ErrT	err;
+mir_sdr_DeviceT devDesc [4];
+uint32_t	numofDevs;
+float	ver;
+
+	err	= mir_sdr_ApiVersion (&ver);
+	if (err != mir_sdr_Success) {
+	   fprintf (stderr, "Could not identify library version, fatal\n");
+	   exit (21);
+	}
+
+	if (ver < 2.13) {
+	   fprintf (stderr, "Incompatible libary version, upgrade to 2.13\n");
+	   exit (22);
+	}
+	err 	= mir_sdr_GetDevices (devDesc, &numofDevs, (uint32_t) (4));
+        if ((err != mir_sdr_Success) || (numofDevs == 0)) {
+           fprintf (stderr, "Sorry, no device found\n");
+	   exit (23);
+	}
+
+	if ((Modes. dev_index < 0) || (Modes. dev_index >= (int)numofDevs)) {
+	   fprintf (stderr, "Cannot handle requested device index\n");
+	   exit (24);
+	}
+	int hwVersion = devDesc [Modes. dev_index]. hwVer;
+        fprintf (stderr, "hwVer = %d\n", hwVersion);
+        fprintf (stderr, "devicename = %s\n",
+	                      devDesc [Modes. dev_index]. DevNm);
+
+        err = mir_sdr_SetDeviceIdx (Modes. dev_index);
+        if (err != mir_sdr_Success) {
+           fprintf (stderr, "error at SetDeviceIdx %d \n", err);
+	   exit (25);
+	}
+}
+
+static
+void sdrplayCallback (int16_t          *xi,
+	              int16_t          *xq,
+	              uint32_t         firstSampleNum,
+	              int32_t          grChanged,
+	              int32_t          rfChanged,
+	              int32_t          fsChanged,
+	              uint32_t         numSamples,
+	              uint32_t         reset,
+	              uint32_t         hwRemoved,
+	              void             *ctx) {
+uint	i;
+	MODES_NOTUSED (firstSampleNum);
+	MODES_NOTUSED (grChanged);
+	MODES_NOTUSED (rfChanged);
+	MODES_NOTUSED (fsChanged);
+	MODES_NOTUSED (reset);
+	MODES_NOTUSED (hwRemoved);
+	MODES_NOTUSED (ctx);
+
+	pthread_mutex_lock (&Modes.data_mutex);
+	for (i = 0; i < numSamples; i ++) {
+	   Modes. localBuf [Modes. nextp ++] = xi [i];
+	   Modes. localBuf [Modes. nextp ++] = xq [i];
+	   if (Modes. nextp >= MODES_DATA_LEN) {
+/*
+ *	Move the last part of the previous buffer, that was not processed,
+ *	on the start of the new buffer. */
+	      memcpy (Modes. data, &Modes.data [MODES_DATA_LEN],
+	                    (MODES_FULL_LEN - 1) * 4 * sizeof (int16_t));
+/*
+ *	shift in the new data.
+ */
+	      memcpy (&Modes. data [(MODES_FULL_LEN - 1) * 4],
+	                   Modes. localBuf, MODES_DATA_LEN * sizeof (int16_t));
+	      Modes. data_ready = 1;
+	      Modes. nextp = 0;
+	   }
+	}
+/*
+ *	Signal to the other thread that new data is ready
+ */
+	if (Modes. data_ready == 1) 
+	   pthread_cond_signal (&Modes. data_cond);
+	pthread_mutex_unlock (&Modes. data_mutex);
+}
+#else
 /* =============================== RTLSDR handling ========================== */
 
 void modesInitRTLSDR(void) {
@@ -404,62 +524,99 @@ void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
     pthread_cond_signal(&Modes.data_cond);
     pthread_mutex_unlock(&Modes.data_mutex);
 }
-
+#endif
 /* This is used when --ifile is specified in order to read data from file
- * instead of using an RTLSDR device. */
+ * instead of using an RTLSDR/SDRPLAY device. */
 void readDataFromFile(void) {
-    pthread_mutex_lock(&Modes.data_mutex);
-    while(1) {
-        ssize_t nread, toread;
-        unsigned char *p;
-
-        if (Modes.data_ready) {
-            pthread_cond_wait(&Modes.data_cond,&Modes.data_mutex);
-            continue;
-        }
-
-        if (Modes.interactive) {
-            /* When --ifile and --interactive are used together, slow down
-             * playing at the natural rate of the RTLSDR received. */
-            pthread_mutex_unlock(&Modes.data_mutex);
-            usleep(5000);
-            pthread_mutex_lock(&Modes.data_mutex);
-        }
-
-        /* Move the last part of the previous buffer, that was not processed,
-         * on the start of the new buffer. */
-        memcpy(Modes.data, Modes.data+MODES_DATA_LEN, (MODES_FULL_LEN-1)*4);
-        toread = MODES_DATA_LEN;
-        p = Modes.data+(MODES_FULL_LEN-1)*4;
-        while(toread) {
-            nread = read(Modes.fd, p, toread);
-            if (nread <= 0) {
-                Modes.exit = 1; /* Signal the other thread to exit. */
-                break;
-            }
-            p += nread;
-            toread -= nread;
-        }
-        if (toread) {
-            /* Not enough data on file to fill the buffer? Pad with
-             * no signal. */
-            memset(p,127,toread);
-        }
-        Modes.data_ready = 1;
-        /* Signal to the other thread that new data is ready */
-        pthread_cond_signal(&Modes.data_cond);
-    }
+//    pthread_mutex_lock(&Modes.data_mutex);
+//    while(1) {
+//        ssize_t nread, toread;
+//        unsigned char *p;
+//
+//        if (Modes.data_ready) {
+//            pthread_cond_wait(&Modes.data_cond,&Modes.data_mutex);
+//            continue;
+//        }
+//
+//        if (Modes.interactive) {
+//            /* When --ifile and --interactive are used together, slow down
+//             * playing at the natural rate of the RTLSDR received. */
+//            pthread_mutex_unlock(&Modes.data_mutex);
+//            usleep(5000);
+//            pthread_mutex_lock(&Modes.data_mutex);
+//        }
+//
+//        /* Move the last part of the previous buffer, that was not processed,
+//         * on the start of the new buffer. */
+//        memcpy(Modes.data, Modes.data+MODES_DATA_LEN, (MODES_FULL_LEN-1)*4);
+//        toread = MODES_DATA_LEN;
+//        p = Modes.data+(MODES_FULL_LEN-1)*4;
+//        while(toread) {
+//            nread = read(Modes.fd, p, toread);
+//            if (nread <= 0) {
+//                Modes.exit = 1; /* Signal the other thread to exit. */
+//                break;
+//            }
+//            p += nread;
+//            toread -= nread;
+//        }
+//        if (toread) {
+//            /* Not enough data on file to fill the buffer? Pad with
+//             * no signal. */
+//            memset(p,127,toread);
+//        }
+//        Modes.data_ready = 1;
+//        /* Signal to the other thread that new data is ready */
+//        pthread_cond_signal(&Modes.data_cond);
+//    }
 }
 
 /* We read data using a thread, so the main thread only handles decoding
  * without caring about data acquisition. */
 void *readerThreadEntryPoint(void *arg) {
-    MODES_NOTUSED(arg);
+	 MODES_NOTUSED(arg);
 
-    if (Modes.filename == NULL) {
+	if (Modes.filename == NULL) {
+#ifdef	__SDRPLAY__
+	mir_sdr_ErrT err;
+	int	GRdBSystem	= 0;
+	int	samplesPerPacket;
+	int	MHz_1		= 1000000;
+	int	localGRdB	= (20 <= Modes. GRdB) &&
+	                                (Modes. GRdB <= 59) ? Modes. GRdB : 30;
+	err = mir_sdr_StreamInit (&localGRdB,
+                                  ((double) MODES_DEFAULT_RATE) / MHz_1,
+                                  ((double) Modes. freq) / MHz_1,
+                                  mir_sdr_BW_1_536,
+                                  mir_sdr_IF_Zero,
+                                  Modes. lnaState,
+                                  &GRdBSystem,
+                                  mir_sdr_USE_RSP_SET_GR,
+                                  &samplesPerPacket,
+                                  (mir_sdr_StreamCallback_t)sdrplayCallback,
+	                          NULL,
+                                  NULL);
+	   if (err != mir_sdr_Success) {
+	      fprintf (stderr, "Error %d on streamInit\n", err);
+	      exit (26);
+	   }
+	   if (Modes. enable_agc) {
+	      err  = mir_sdr_AgcControl (mir_sdr_AGC_100HZ,
+                                         -30, 0, 0, 0, 0, Modes. lnaState);
+	      if (err != mir_sdr_Success)
+	         fprintf (stderr, "Error %d on AgcControl\n", err);
+	   }
+
+//	   mir_sdr_SetPpm       ((float)ppm);
+	   mir_sdr_SetDcMode (4, 1);
+	   mir_sdr_SetDcTrackTime (63);
+
+
+#else
         rtlsdr_read_async(Modes.dev, rtlsdrCallback, NULL,
                               MODES_ASYNC_BUF_NUMBER,
                               MODES_DATA_LEN);
+#endif
     } else {
         readDataFromFile();
     }
@@ -1226,11 +1383,18 @@ void displayModesMessage(struct modesMessage *mm) {
  * pointed by Modes.magnitude. */
 void computeMagnitudeVector(void) {
     uint16_t *m = Modes.magnitude;
-    unsigned char *p = Modes.data;
     uint32_t j;
 
     /* Compute the magnitudo vector. It's just SQRT(I^2 + Q^2), but
      * we rescale to the 0-255 range to exploit the full resolution. */
+#ifdef	__SDRPLAY__
+	for (j = 0; j < Modes. data_len; j += 2) {
+	   float re	= Modes. data [j] / 1024.0;
+	   float im	= Modes. data [j + 1] / 1024.0;
+	   Modes. magnitude [j / 2]	= sqrt (re * re + im * im) * 255;
+	}
+#else
+    unsigned char *p = Modes.data;
     for (j = 0; j < Modes.data_len; j += 2) {
         int i = p[j]-127;
         int q = p[j+1]-127;
@@ -1239,6 +1403,7 @@ void computeMagnitudeVector(void) {
         if (q < 0) q = -q;
         m[j/2] = Modes.maglut[i*129+q];
     }
+#endif
 }
 
 /* Return -1 if the message is out of fase left-side
@@ -2418,11 +2583,19 @@ int getTermRows() {
 
 void showHelp(void) {
     printf(
+#ifdef	__SDRPLAY__
+"--device-index <index}   Select SDRplay device (default: 0).\n"
+"--lnaState <N>           Set the lna gain reduction (default: 2).\n"
+"--GRdB <N>               Set the Gain Reduction in DB's (default: 30).\n"
+#else
 "--device-index <index>   Select RTL device (default: 0).\n"
 "--gain <db>              Set gain (default: max gain. Use -100 for auto-gain).\n"
+#endif
 "--enable-agc             Enable the Automatic Gain Control (default: off).\n"
 "--freq <hz>              Set frequency (default: 1090 Mhz).\n"
+#ifndef	__SDRPLAY__
 "--ifile <filename>       Read data from file (use '-' for stdin).\n"
+__endif
 "--interactive            Interactive mode refreshing data on screen.\n"
 "--interactive-rows <num> Max number of rows in interactive mode (default: 15).\n"
 "--interactive-ttl <sec>  Remove from list if idle for <sec> (default: 60).\n"
@@ -2486,8 +2659,15 @@ int main(int argc, char **argv) {
 
         if (!strcmp(argv[j],"--device-index") && more) {
             Modes.dev_index = atoi(argv[++j]);
+#ifdef	__SDRPLAY__
+	} else if (!strcmp (argv [j], "--lnaState") && more) {
+	   Modes. lnaState = atoi (argv [++j]);
+	} else if (!strcmp (argv [j], "--GRdB") && more) {
+	   Modes. GRdB = atoi (argv [++j]);
+#else
         } else if (!strcmp(argv[j],"--gain") && more) {
             Modes.gain = atof(argv[++j])*10; /* Gain is in tens of DBs */
+#endif
         } else if (!strcmp(argv[j],"--enable-agc")) {
             Modes.enable_agc++;
         } else if (!strcmp(argv[j],"--freq") && more) {
@@ -2568,7 +2748,11 @@ int main(int argc, char **argv) {
     if (Modes.net_only) {
         fprintf(stderr,"Net-only mode, no RTL device or file open.\n");
     } else if (Modes.filename == NULL) {
+#ifdef	__SDRPLAY__
+	modesInitSDRPLAY ();
+#else
         modesInitRTLSDR();
+#endif
     } else {
         if (Modes.filename[0] == '-' && Modes.filename[1] == '\0') {
             Modes.fd = STDIN_FILENO;
@@ -2628,8 +2812,11 @@ int main(int argc, char **argv) {
         printf("%lld total usable messages\n",
             Modes.stat_goodcrc + Modes.stat_fixed);
     }
-
+#ifdef	__SDRPLAY__
+	mir_sdr_ReleaseDeviceIdx ();
+#else
     rtlsdr_close(Modes.dev);
+#endif
     return 0;
 }
 

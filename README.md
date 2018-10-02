@@ -1,5 +1,6 @@
 Dump1090 README
 ===
+>>>>> This version has additional support for the SDRplay devices <<<<<<<<<
 
 Dump 1090 is a Mode S decoder specifically designed for RTLSDR devices.
 
@@ -30,40 +31,40 @@ available, developed by MalcolmRobb.
 Installation
 ---
 
-Type "make".
+Type "make -f Makefile.xxx", where xxx is either "rtlsdr" or "sdrplay".
 
 Normal usage
 ---
 
-To capture traffic directly from your RTL device and show the captured traffic
+To capture traffic directly from your input device and show the captured traffic
 on standard output, just run the program without options at all:
 
-    ./dump1090
+    ./dump1090-xxx, (xxx = "rtlsdr" or "sdrplay")
 
 To just output hexadecimal messages:
 
-    ./dump1090 --raw
+    ./dump1090-xxx --raw
 
 To run the program in interactive mode:
 
-    ./dump1090 --interactive
+    ./dump1090-xxx --interactive
 
 To run the program in interactive mode, with networking support, and connect
 with your browser to http://localhost:8080 to see live traffic:
 
-    ./dump1090 --interactive --net
+    ./dump1090-xxx --interactive --net
 
 In interactive mode it is possible to have a less information dense but more
 "arcade style" output, where the screen is refreshed every second displaying
 all the recently seen aircrafts with some additional information such as
 altitude and flight number, extracted from the received Mode S packets.
 
-Using files as source of data
+Using files as source of data (NOT IMPLEMENTED FOR THE SDRPLAY VERSION)
 ---
 
 To decode data from file, use:
 
-    ./dump1090 --ifile /path/to/binfile
+    ./dump1090-rtlsdr --ifile /path/to/binfile
 
 The binary file should be created using `rtl_sdr` like this (or with any other
 program that is able to output 8-bit unsigned IQ samples at 2Mhz sample rate).
@@ -80,10 +81,10 @@ the --ifile option with "-" as argument.
 Additional options
 ---
 
-Dump1090 can be called with other command line options to set a different
+Dump1090-xxx can be called with other command line options to set a different
 gain, frequency, and so forth. For a list of options use:
 
-    ./dump1090 --help
+    ./dump1090-xxx --help
 
 Everything is not documented here should be obvious, and for most users calling
 it without arguments at all is the best thing to do.
